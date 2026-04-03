@@ -8,8 +8,34 @@ const { listFiles, uploadFiles, deleteFile, downloadFile } = require('@huggingfa
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const HF_BUCKET = process.env.HF_BUCKET || ''; // e.g. 'ogama2339d/ogama2339d'
-const HF_TOKEN = process.env.HF_TOKEN || '';
+const CONFIG_FILE_PATH = process.env.CONFIG_FILE_PATH || (process.env.VERCEL ? path.join('/tmp', 'app-config.json') : path.join(__dirname, 'app-config.json'));
+const runtimeConfig = {
+  hfBucket: process.env.HF_BUCKET || '',
+  hfToken: process.env.HF_TOKEN || '',
+};
+const uploadsDir = process.env.UPLOADS_DIR || (process.env.VERCEL ? path.join('/tmp', 'uploads') : path.join(__dirname, 'uploads'));
+
+function loadRuntimeConfig() {
+  try {
+    if (fs.existsSync(CONFIG_FILE_PATH)) {
+      const fileData = fs.readFileSync(CONFIG_FILE_PATH, 'utf8');
+      const saved = JSON.parse(fileData);
+      if (saved && typeof saved === 'object') {
+        runtimeConfig.hfBucket = saved.hfBucket || runtimeConfig.hfBucket;
+        runtimeConfig.hfToken = saved.hfToken || runtimeConfig.hfToken;
+      }
+    }
+  } catch (error) {
+    console.warn('Unable to load runtime config:', error.message);
+  }
+}
+
+async function saveRuntimeConfig() {
+  await fs.promises.mkdir(path.dirname(CONFIG_FILE_PATH), { recursive: true });
+  await fs.promises.writeFile(CONFIG_FILE_PATH, JSON.stringify(runtimeConfig, null, 2), 'utf8');
+}
+
+loadRuntimeConfig();
 
 // Middleware
 app.use(cors());
@@ -23,18 +49,48 @@ app.get('/', (req, res) => {
       res.status(500).send('Error loading page');
       return;
     }
-    const configScript = `<script>window.APP_CONFIG = { hasHfToken: ${!!HF_TOKEN} };</script>`;
+    const configScript = `<script>window.APP_CONFIG = { hasHfToken: ${!!runtimeConfig.hfToken} };</script>`;
     const modifiedHtml = data.replace('<link rel="stylesheet" href="style.css">', configScript + '\n  <link rel="stylesheet" href="style.css">');
     res.send(modifiedHtml);
   });
 });
 
+app.get(['/api/config', '/config'], (req, res) => {
+  res.json({
+    hfBucket: runtimeConfig.hfBucket || null,
+    hasHfToken: !!runtimeConfig.hfToken,
+    canUseLocalStorage: true,
+  });
+});
+
+app.post('/api/config', async (req, res) => {
+  const { hfBucket, hfToken, clearToken } = req.body;
+  if (hfBucket !== undefined) {
+    runtimeConfig.hfBucket = hfBucket || '';
+  }
+  if (hfToken !== undefined && hfToken !== '') {
+    runtimeConfig.hfToken = hfToken;
+  } else if (clearToken) {
+    runtimeConfig.hfToken = '';
+  }
+
+  try {
+    await saveRuntimeConfig();
+    res.json({
+      hfBucket: runtimeConfig.hfBucket || null,
+      hasHfToken: !!runtimeConfig.hfToken,
+    });
+  } catch (error) {
+    console.error('Config save error:', error);
+    res.status(500).json({ error: 'Could not save configuration', details: error.message });
+  }
+});
+
 app.use(express.static('public'));
 
 // Create uploads directory if it doesn't exist
-const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir);
+  fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
 // Configure multer for file uploads (memory storage)
@@ -269,8 +325,9 @@ app.post('/api/move', async (req, res) => {
 
 // Hugging Face Bucket routes
 function hfCheckConfig(res) {
-  if (!HF_BUCKET || !HF_TOKEN) {
-    res.status(400).json({ error: 'HF_BUCKET and HF_TOKEN must be set in environment' });
+  const { hfBucket, hfToken } = runtimeConfig;
+  if (!hfBucket || !hfToken) {
+    res.status(400).json({ error: 'HF_BUCKET and HF_TOKEN must be set in environment or configuration' });
     return false;
   }
   return true;
@@ -280,7 +337,8 @@ app.get('/api/hf/files', async (req, res) => {
   if (!hfCheckConfig(res)) return;
   try {
     const output = [];
-    for await (const item of listFiles({ repo: `buckets/${HF_BUCKET}`, recursive: true, accessToken: HF_TOKEN })) {
+    const { hfBucket, hfToken } = runtimeConfig;
+    for await (const item of listFiles({ repo: `buckets/${hfBucket}`, recursive: true, accessToken: hfToken })) {
       output.push({
         path: item.path,
         type: item.type,
@@ -303,10 +361,11 @@ app.post('/api/hf/upload', upload.single('file'), async (req, res) => {
 
   try {
     const blob = new Blob([req.file.buffer]);
+    const { hfBucket, hfToken } = runtimeConfig;
     await uploadFiles({
-      repo: `buckets/${HF_BUCKET}`,
+      repo: `buckets/${hfBucket}`,
       files: [{ path: req.file.originalname, content: blob }],
-      accessToken: HF_TOKEN,
+      accessToken: hfToken,
       useXet: true,
     });
 
@@ -322,7 +381,8 @@ app.get('/api/hf/download/*', async (req, res) => {
   const filename = req.params[0];
 
   try {
-    const blob = await downloadFile({ repo: `buckets/${HF_BUCKET}`, path: filename, accessToken: HF_TOKEN });
+    const { hfBucket, hfToken } = runtimeConfig;
+    const blob = await downloadFile({ repo: `buckets/${hfBucket}`, path: filename, accessToken: hfToken });
     if (!blob) {
       return res.status(404).json({ error: 'File not found in HF bucket' });
     }
@@ -344,8 +404,9 @@ app.get('/api/hf/public-url/*', (req, res) => {
     return res.status(400).json({ error: 'Filename required' });
   }
 
-  const baseUrl = `https://huggingface.co/buckets/${HF_BUCKET}/resolve/main/${encodeURIComponent(filename)}`;
-  const tokenUrl = HF_TOKEN ? `${baseUrl}?token=${encodeURIComponent(HF_TOKEN)}` : baseUrl;
+  const { hfBucket, hfToken } = runtimeConfig;
+  const baseUrl = `https://huggingface.co/buckets/${hfBucket}/resolve/main/${encodeURIComponent(filename)}`;
+  const tokenUrl = hfToken ? `${baseUrl}?token=${encodeURIComponent(hfToken)}` : baseUrl;
   const proxyUrl = `${req.protocol}://${req.get('host')}/api/hf/download/${encodeURIComponent(filename)}`;
 
   res.json({ url: tokenUrl, proxyUrl });
@@ -355,7 +416,8 @@ app.delete('/api/hf/delete/*', async (req, res) => {
   if (!hfCheckConfig(res)) return;
   const filename = req.params[0];
   try {
-    await deleteFile({ repo: `buckets/${HF_BUCKET}`, path: filename, accessToken: HF_TOKEN });
+    const { hfBucket, hfToken } = runtimeConfig;
+    await deleteFile({ repo: `buckets/${hfBucket}`, path: filename, accessToken: hfToken });
     res.json({ message: 'Deleted from HF bucket successfully' });
   } catch (error) {
     console.error('HF delete error', error);
@@ -372,7 +434,7 @@ app.post('/api/hf/delete-multiple', async (req, res) => {
   try {
     await Promise.all(
       filenames.map((filename) =>
-        deleteFile({ repo: `buckets/${HF_BUCKET}`, path: filename, accessToken: HF_TOKEN })
+        deleteFile({ repo: `buckets/${runtimeConfig.hfBucket}`, path: filename, accessToken: runtimeConfig.hfToken })
       )
     );
     res.json({ message: 'HF files deleted successfully' });
@@ -389,17 +451,18 @@ app.post('/api/hf/rename', async (req, res) => {
     return res.status(400).json({ error: 'oldPath and newPath are required' });
   }
   try {
-    const blob = await downloadFile({ repo: `buckets/${HF_BUCKET}`, path: oldPath, accessToken: HF_TOKEN });
+    const { hfBucket, hfToken } = runtimeConfig;
+    const blob = await downloadFile({ repo: `buckets/${hfBucket}`, path: oldPath, accessToken: hfToken });
     if (!blob) {
       return res.status(404).json({ error: 'Source file not found in HF bucket' });
     }
     await uploadFiles({
-      repo: `buckets/${HF_BUCKET}`,
+      repo: `buckets/${hfBucket}`,
       files: [{ path: newPath, content: blob }],
-      accessToken: HF_TOKEN,
+      accessToken: hfToken,
       useXet: true,
     });
-    await deleteFile({ repo: `buckets/${HF_BUCKET}`, path: oldPath, accessToken: HF_TOKEN });
+    await deleteFile({ repo: `buckets/${hfBucket}`, path: oldPath, accessToken: hfToken });
     res.json({ message: 'HF file renamed successfully' });
   } catch (error) {
     console.error('HF rename error', error);
@@ -421,7 +484,8 @@ app.post('/api/hf/upload-multiple', upload.array('files'), async (req, res) => {
       return { path: targetPath, content: new Blob([f.buffer]) };
     });
 
-    await uploadFiles({ repo: `buckets/${HF_BUCKET}`, files: filesToUpload, accessToken: HF_TOKEN, useXet: true });
+    const { hfBucket, hfToken } = runtimeConfig;
+    await uploadFiles({ repo: `buckets/${hfBucket}`, files: filesToUpload, accessToken: hfToken, useXet: true });
     res.json({ message: 'HF bucket files uploaded successfully' });
   } catch (error) {
     console.error('HF upload-multiple error', error);
@@ -437,13 +501,14 @@ app.post('/api/hf/create-folder', async (req, res) => {
   }
   // For HF buckets, folders are implicit, so just create a dummy file to ensure the path exists, then delete it
   try {
+    const { hfBucket, hfToken } = runtimeConfig;
     await uploadFiles({
-      repo: `buckets/${HF_BUCKET}`,
+      repo: `buckets/${hfBucket}`,
       files: [{ path: `${folderPath}/.keep`, content: new Blob(['']) }],
-      accessToken: HF_TOKEN,
+      accessToken: hfToken,
       useXet: true,
     });
-    await deleteFile({ repo: `buckets/${HF_BUCKET}`, path: `${folderPath}/.keep`, accessToken: HF_TOKEN });
+    await deleteFile({ repo: `buckets/${hfBucket}`, path: `${folderPath}/.keep`, accessToken: hfToken });
     res.json({ message: 'HF folder created successfully' });
   } catch (error) {
     console.error('HF create-folder error', error);
@@ -460,16 +525,17 @@ app.post('/api/hf/move', async (req, res) => {
   try {
     await Promise.all(
       files.map(async (filePath) => {
-        const blob = await downloadFile({ repo: `buckets/${HF_BUCKET}`, path: filePath, accessToken: HF_TOKEN });
+        const { hfBucket, hfToken } = runtimeConfig;
+        const blob = await downloadFile({ repo: `buckets/${hfBucket}`, path: filePath, accessToken: hfToken });
         if (!blob) throw new Error(`File ${filePath} not found`);
         const newPath = `${destination}/${path.basename(filePath)}`;
         await uploadFiles({
-          repo: `buckets/${HF_BUCKET}`,
+          repo: `buckets/${hfBucket}`,
           files: [{ path: newPath, content: blob }],
-          accessToken: HF_TOKEN,
+          accessToken: hfToken,
           useXet: true,
         });
-        await deleteFile({ repo: `buckets/${HF_BUCKET}`, path: filePath, accessToken: HF_TOKEN });
+        await deleteFile({ repo: `buckets/${hfBucket}`, path: filePath, accessToken: hfToken });
       })
     );
     res.json({ message: 'HF files moved successfully' });
@@ -479,7 +545,11 @@ app.post('/api/hf/move', async (req, res) => {
   }
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
-});
+// Start server when run directly
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Server running at http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;

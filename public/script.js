@@ -16,11 +16,32 @@ const createFolderBtn = document.getElementById('createFolderBtn');
 const moveSelectedBtn = document.getElementById('moveSelectedBtn');
 const deleteSelectedBtn = document.getElementById('deleteSelectedBtn');
 const clearSelectionBtn = document.getElementById('clearSelectionBtn');
+const hfBucketInput = document.getElementById('hfBucketInput');
+const hfTokenInput = document.getElementById('hfTokenInput');
+const hfTokenStatus = document.getElementById('hfTokenStatus');
+const saveConfigBtn = document.getElementById('saveConfigBtn');
+const clearTokenBtn = document.getElementById('clearTokenBtn');
 
 let currentTarget = 'local';
 let currentPath = ''; // Current folder path for navigation
 let selectedFiles = new Set();
 let cachedFiles = [];
+let appConfig = { hasHfToken: false, hfBucket: null };
+
+async function loadAppConfig() {
+  try {
+    const response = await fetch('/api/config');
+    if (!response.ok) throw new Error('Could not load app config');
+    appConfig = await response.json();
+    window.APP_CONFIG = appConfig;
+    updateConfigForm();
+  } catch (err) {
+    appConfig = { hasHfToken: false, hfBucket: null };
+    window.APP_CONFIG = appConfig;
+    updateConfigForm();
+    console.warn('Unable to load app config:', err);
+  }
+}
 
 function setStatus(message, type = 'success', target = uploadStatus) {
   target.textContent = message;
@@ -29,6 +50,58 @@ function setStatus(message, type = 'success', target = uploadStatus) {
     target.classList.remove('show');
   }, 3000);
 }
+
+function updateConfigForm() {
+  hfBucketInput.value = appConfig.hfBucket || '';
+  hfTokenInput.value = '';
+  hfTokenStatus.textContent = appConfig.hasHfToken ? 'HF token is configured.' : 'No HF token configured yet.';
+}
+
+saveConfigBtn.addEventListener('click', async () => {
+  const payload = { hfBucket: hfBucketInput.value.trim() };
+  const tokenValue = hfTokenInput.value.trim();
+  if (tokenValue !== '') {
+    payload.hfToken = tokenValue;
+  }
+
+  try {
+    const response = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const err = await response.json();
+      throw new Error(err.error || 'Unable to save configuration');
+    }
+    appConfig = await response.json();
+    updateConfigForm();
+    setStatus('Configuration saved successfully', 'success');
+  } catch (error) {
+    setStatus('Config save failed: ' + error.message, 'error');
+  }
+});
+
+clearTokenBtn.addEventListener('click', async () => {
+  if (!confirm('Clear the current HF token? This may disable HF bucket access until you save a new token.')) return;
+
+  try {
+    const response = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clearToken: true }),
+    });
+    if (!response.ok) {
+      const err = await response.json();
+      throw new Error(err.error || 'Unable to clear token');
+    }
+    appConfig = await response.json();
+    updateConfigForm();
+    setStatus('HF token cleared successfully', 'success');
+  } catch (error) {
+    setStatus('Clear token failed: ' + error.message, 'error');
+  }
+});
 
 function sortFileList(items) {
   const field = sortBySelect.value;
@@ -213,6 +286,10 @@ folderInput.addEventListener('change', async () => {
 
 async function uploadFiles(fileList, isFolder = false) {
   const target = document.querySelector('input[name="uploadTarget"]:checked').value;
+  if (target === 'hf' && !appConfig.hfBucket) {
+    setStatus('HF bucket is not configured. Enter it in the configuration panel above.', 'error');
+    return;
+  }
   const baseUrl = target === 'hf' ? '/api/hf' : '/api';
   const formData = new FormData();
 
@@ -491,11 +568,8 @@ window.downloadFile = async (encodedName, target) => {
       const resp = await fetch(`/api/hf/public-url/${encodeURIComponent(name)}`);
       if (!resp.ok) throw new Error('Cannot get HF URL');
       const json = await resp.json();
-      // For private buckets (with token), use proxy download to avoid third-party cookie issues
-      // For public buckets, use direct HF URL
-      const downloadUrl = window.APP_CONFIG?.hasHfToken ? json.proxyUrl : json.url;
-      if (window.APP_CONFIG?.hasHfToken) {
-        // Use proxy download for private buckets
+      const downloadUrl = appConfig.hasHfToken ? json.proxyUrl : json.url;
+      if (appConfig.hasHfToken) {
         const a = document.createElement('a');
         a.href = downloadUrl;
         a.download = name.split('/').pop();
@@ -504,7 +578,6 @@ window.downloadFile = async (encodedName, target) => {
         document.body.removeChild(a);
         setStatus('Downloading via proxy', 'success');
       } else {
-        // Use direct HF URL for public buckets
         window.open(downloadUrl, '_blank');
         setStatus('Opening direct HF download', 'success');
       }
@@ -531,8 +604,7 @@ window.copyLink = async (encodedName, target) => {
       const resp = await fetch(`/api/hf/public-url/${encodeURIComponent(name)}`);
       if (!resp.ok) throw new Error('Cannot get HF URL');
       const json = await resp.json();
-      // For private buckets, copy proxy URL; for public, copy direct HF URL
-      const linkUrl = window.APP_CONFIG?.hasHfToken ? json.proxyUrl : json.url;
+      const linkUrl = appConfig.hasHfToken ? json.proxyUrl : json.url;
       await navigator.clipboard.writeText(linkUrl);
       setStatus('HF link copied to clipboard', 'success');
       return;
@@ -623,6 +695,11 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
-loadFiles();
-setInterval(() => loadFiles(currentTarget), 5000);
+async function initApp() {
+  await loadAppConfig();
+  loadFiles();
+  setInterval(() => loadFiles(currentTarget), 5000);
+}
+
+initApp();
 

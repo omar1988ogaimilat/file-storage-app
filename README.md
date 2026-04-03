@@ -36,5 +36,26 @@ npm start
 
 ## Notes
 
-- Ensure `HF_BUCKET` and `HF_TOKEN` are set before starting the server.
+- Ensure `HF_BUCKET` and `HF_TOKEN` are set before starting the server or use the app configuration UI.
 - HF bucket path is `buckets/<namespace>/<bucket-name>` in the code.
+- Use `UPLOADS_DIR` to override local storage path when needed.
+- Configuration saved through the app is stored in a runtime config file and used by Hugging Face routes.
+
+## Vercel Deployment
+
+1. Install the Vercel CLI if needed:
+   ```bash
+   npm install -g vercel
+   ```
+2. Deploy from the project root:
+   ```bash
+   cd /workspaces/file-storage-app
+   vercel --prod
+   ```
+3. Configure environment variables in Vercel:
+   - `HF_BUCKET`
+   - `HF_TOKEN`
+   - Optional: `UPLOADS_DIR=/tmp/uploads` for temporary local uploads on Vercel.
+4. The app uses Vercel serverless API routes under `/api/*`.
+
+> Note: local uploads and runtime config file storage on Vercel are ephemeral and stored in temporary function storage. Configuration saved through the app will work during the current deployment instance, but it is not guaranteed to persist across new cold starts or redeployments.
